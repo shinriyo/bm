@@ -1,11 +1,24 @@
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process;
+use std::error::Error;
 
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    execute,
+};
 use dirs::home_dir;
-use ratatui::{backend::CrosstermBackend, layout::*, style::*, widgets::*, Terminal};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::*,
+    style::*,
+    text::Span,
+    widgets::*,
+    Terminal,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -41,23 +54,33 @@ fn save_bookmarks(bookmarks: &[Bookmark]) {
     fs::write(path, data).unwrap();
 }
 
-fn main() -> Result<(), io::Error> {
+fn run_tui() -> Result<(), Box<dyn Error>> {
+    // Terminal setup
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        crossterm::cursor::Hide
+    )?;
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
     let mut bookmarks = load_bookmarks();
     let mut selected = 0;
 
-    let stdout = io::stdout();
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    terminal.clear()?;
-
-    loop {
+    let result = loop {
         terminal.draw(|f| {
+            let size = f.area();
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .margin(1)
-                .constraints([Constraint::Min(1)].as_ref())
-                .split(f.size());
+                .constraints([
+                    Constraint::Min(3),
+                    Constraint::Length(1),
+                ])
+                .split(size);
 
             let items: Vec<ListItem> = bookmarks
                 .iter()
@@ -69,55 +92,95 @@ fn main() -> Result<(), io::Error> {
                 .highlight_style(Style::default().bg(Color::LightGreen).fg(Color::Black))
                 .highlight_symbol("→ ");
 
-            f.render_stateful_widget(list, chunks[0], &mut tui::widgets::ListState::default().select(Some(selected)));
+            let mut state = ListState::default();
+            state.select(Some(selected));
+            f.render_stateful_widget(list, chunks[0], &mut state);
+
+            // Help message at bottom
+            let help_text = "j/k: move  u: add bookmark  !: delete  Enter: select  q: quit";
+            let help = Span::raw(help_text);
+            f.render_widget(
+                Block::default()
+                    .title(help)
+                    .borders(Borders::BOTTOM),
+                chunks[1],
+            );
         })?;
 
-        if event::poll(std::time::Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
+        if let Event::Key(key) = event::read()? {
+            if key.kind == KeyEventKind::Press {
                 match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('j') => {
-                        if selected + 1 < bookmarks.len() {
-                            selected += 1;
-                        }
+                    KeyCode::Char('q') => break Ok(()),
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        selected = (selected + 1).min(bookmarks.len().saturating_sub(1));
                     }
-                    KeyCode::Char('k') => {
-                        if selected > 0 {
-                            selected -= 1;
-                        }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        selected = selected.saturating_sub(1);
                     }
                     KeyCode::Char('u') => {
-                        let cwd = std::env::current_dir().unwrap().to_str().unwrap().to_string();
-                        if !bookmarks.iter().any(|b| b.path == cwd) {
-                            bookmarks.push(Bookmark {
-                                name: format!("bookmark_{}", bookmarks.len() + 1),
-                                path: cwd,
-                            });
-                            save_bookmarks(&bookmarks);
+                        if let Ok(cwd) = std::env::current_dir() {
+                            if let Some(cwd_str) = cwd.to_str() {
+                                let path = cwd_str.to_string();
+                                if !bookmarks.iter().any(|b| b.path == path) {
+                                    bookmarks.push(Bookmark {
+                                        name: format!("bookmark_{}", bookmarks.len() + 1),
+                                        path: path.clone(),
+                                    });
+                                    save_bookmarks(&bookmarks);
+                                    selected = bookmarks.len() - 1;
+                                }
+                            }
                         }
                     }
                     KeyCode::Char('!') => {
-                        // 簡略化: 選択中のものを削除（確認なし）
                         if !bookmarks.is_empty() {
-                            bookmarks.remove(selected);
-                            if selected >= bookmarks.len() && selected > 0 {
-                                selected -= 1;
+                            terminal.clear()?;
+                            terminal.backend_mut().write_all(b"\nDelete this bookmark? (y/n): ")?;
+                            terminal.backend_mut().flush()?;
+
+                            loop {
+                                if let Event::Key(conf) = event::read()? {
+                                    match conf.code {
+                                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                            bookmarks.remove(selected);
+                                            if selected >= bookmarks.len() && selected > 0 {
+                                                selected -= 1;
+                                            }
+                                            save_bookmarks(&bookmarks);
+                                            break;
+                                        }
+                                        KeyCode::Char('n') | KeyCode::Char('N') => {
+                                            break;
+                                        }
+                                        _ => continue,
+                                    }
+                                }
                             }
-                            save_bookmarks(&bookmarks);
                         }
                     }
                     KeyCode::Enter => {
                         if let Some(b) = bookmarks.get(selected) {
                             println!("{}", b.path);
-                            process::exit(0);
+                            break Ok(());
                         }
                     }
                     _ => {}
                 }
             }
         }
-    }
+    };
 
-    terminal.clear()?;
-    Ok(())
+    // Cleanup
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    )?;
+
+    result
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    run_tui()
 }

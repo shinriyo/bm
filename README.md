@@ -1,5 +1,16 @@
 # bm
 
+## Installation
+
+```sh
+# Clone the repository
+git clone https://github.com/yourusername/bm.git
+cd bm
+
+# Install the binary
+cargo install --path .
+```
+
 ## Demo
 
 ![demo.gif](demo.gif)
@@ -16,5 +27,5 @@
 
 ```sh
 function bmgo() {
-  cd \"$(bm)\"
+  cd "$(bm)"
 }

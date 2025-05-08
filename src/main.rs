@@ -1,6 +1,5 @@
 use std::fs;
 use std::io;
-use std::io::Write;
 use std::path::PathBuf;
 use std::error::Error;
 
@@ -133,25 +132,56 @@ fn run_tui() -> Result<(), Box<dyn Error>> {
                     }
                     KeyCode::Char('!') => {
                         if !bookmarks.is_empty() {
-                            terminal.clear()?;
-                            terminal.backend_mut().write_all(b"\nDelete this bookmark? (y/n): ")?;
-                            terminal.backend_mut().flush()?;
+                            let mut show_confirm = true;
+                            while show_confirm {
+                                terminal.draw(|f| {
+                                    let size = f.area();
+                                    let chunks = Layout::default()
+                                        .direction(Direction::Vertical)
+                                        .constraints([
+                                            Constraint::Min(3),
+                                            Constraint::Length(3),
+                                        ])
+                                        .split(size);
 
-                            loop {
-                                if let Event::Key(conf) = event::read()? {
-                                    match conf.code {
-                                        KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                            bookmarks.remove(selected);
-                                            if selected >= bookmarks.len() && selected > 0 {
-                                                selected -= 1;
+                                    // Bookmark list
+                                    let items: Vec<ListItem> = bookmarks
+                                        .iter()
+                                        .map(|b| ListItem::new(b.path.clone()))
+                                        .collect();
+
+                                    let list = List::new(items)
+                                        .block(Block::default().borders(Borders::ALL).title("Bookmarks"))
+                                        .highlight_style(Style::default().bg(Color::LightGreen).fg(Color::Black))
+                                        .highlight_symbol("→ ");
+
+                                    let mut state = ListState::default();
+                                    state.select(Some(selected));
+                                    f.render_stateful_widget(list, chunks[0], &mut state);
+
+                                    // Confirmation dialog
+                                    let confirm = Paragraph::new("Delete this bookmark? (y/n)")
+                                        .block(Block::default().borders(Borders::ALL).title("Confirm"))
+                                        .style(Style::default().fg(Color::Yellow));
+                                    f.render_widget(confirm, chunks[1]);
+                                })?;
+
+                                if let Event::Key(key) = event::read()? {
+                                    if key.kind == KeyEventKind::Press {
+                                        match key.code {
+                                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                                bookmarks.remove(selected);
+                                                if selected >= bookmarks.len() && selected > 0 {
+                                                    selected -= 1;
+                                                }
+                                                save_bookmarks(&bookmarks);
+                                                show_confirm = false;
                                             }
-                                            save_bookmarks(&bookmarks);
-                                            break;
+                                            KeyCode::Char('n') | KeyCode::Char('N') => {
+                                                show_confirm = false;
+                                            }
+                                            _ => {}
                                         }
-                                        KeyCode::Char('n') | KeyCode::Char('N') => {
-                                            break;
-                                        }
-                                        _ => continue,
                                     }
                                 }
                             }
